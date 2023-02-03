@@ -146,10 +146,8 @@ __host__ __device__ __forceinline__ float vec_sq_diff(const vec3<T> &vec1,
 
 template <typename T> struct AABB {
 public:
-  /// aries: __host__ __device__: Can run both of cpu and gpu.
-  /// min: if T is float, use float max. else, use double max.
   __host__ __device__ AABB() {
-    min_t.x = std::is_same<T, float>::value ? FLT_MAX : DBL_MAX; 
+    min_t.x = std::is_same<T, float>::value ? FLT_MAX : DBL_MAX;
     min_t.y = std::is_same<T, float>::value ? FLT_MAX : DBL_MAX;
     min_t.z = std::is_same<T, float>::value ? FLT_MAX : DBL_MAX;
 
@@ -157,8 +155,13 @@ public:
     max_t.y = std::is_same<T, float>::value ? -FLT_MAX : -DBL_MAX;
     max_t.z = std::is_same<T, float>::value ? -FLT_MAX : -DBL_MAX;
   };
-  __host__ __device__ AABB(const vec3<T> &min_t, const vec3<T> &max_t): min_t(min_t), max_t(max_t){};
-  __host__ __device__ AABB(T min_t_x, T min_t_y, T min_t_z, T max_t_x, T max_t_y, T max_t_z) {
+
+  __host__ __device__ AABB(const vec3<T> &min_t, const vec3<T> &max_t)
+      : min_t(min_t), max_t(max_t){};
+  __host__ __device__ ~AABB(){};
+
+  __host__ __device__ AABB(T min_t_x, T min_t_y, T min_t_z, T max_t_x,
+                           T max_t_y, T max_t_z) {
     min_t.x = min_t_x;
     min_t.y = min_t_y;
     min_t.z = min_t_z;
@@ -166,7 +169,6 @@ public:
     max_t.y = max_t_y;
     max_t.z = max_t_z;
   }
-  __host__ __device__ ~AABB(){};
 
   __host__ __device__ AABB<T> operator+(const AABB<T> &bbox2) const {
     return AABB<T>(
@@ -174,7 +176,7 @@ public:
         min(this->min_t.z, bbox2.min_t.z), max(this->max_t.x, bbox2.max_t.x),
         max(this->max_t.y, bbox2.max_t.y), max(this->max_t.z, bbox2.max_t.z));
   };
-  // volume of overlapping region (if they are overlapping)
+
   __host__ __device__ T operator*(const AABB<T> &bbox2) const {
     return (min(this->max_t.x, bbox2.max_t.x) -
             max(this->min_t.x, bbox2.min_t.x)) *
@@ -235,18 +237,15 @@ std::ostream &operator<<(std::ostream &os, const Triangle<T> &x) {
   return os;
 }
 
-// __global__: use function in GPU, only called by host
 template <typename T>
 __global__ void ComputeTriBoundingBoxes(Triangle<T> *triangles,
                                         int num_triangles, AABB<T> *bboxes) {
-  // idx: global thread id
   int idx = threadIdx.x + blockDim.x * blockIdx.x;
   if (idx < num_triangles) {
     bboxes[idx] = triangles[idx].ComputeBBox();
   }
 }
 
-// __device: use function in GPU, only called by device
 template <typename T>
 __device__ inline vec2<T> isect_interval(const vec3<T> &sep_axis,
                                          const Triangle<T> &tri) {
@@ -505,6 +504,7 @@ __global__ void findPotentialCollisions(long2 *collisionIndices,
   }
   return;
 }
+
 // Expands a 10-bit integer into 30 bits
 // by inserting 2 zeros after each bit.
 __device__
@@ -523,6 +523,7 @@ __device__
   v = (v * 0x00000005u) & 0x49249249u;
   return v;
 }
+
 // Calculates a 30-bit Morton code for the
 // given 3D point located within the unit cube [0,1].
 template <typename T>
@@ -712,6 +713,7 @@ __global__ void CreateHierarchy(BVHNodePtr<T> internal_nodes,
     // Update the visitation counter
     curr_counter = atomicAdd(atomic_counters + current_idx, 1);
   }
+
   return;
 }
 
@@ -720,80 +722,220 @@ void buildBVH(BVHNodePtr<T> internal_nodes, BVHNodePtr<T> leaf_nodes,
               Triangle<T>* __restrict__ triangles,
               thrust::device_vector<int> *triangle_ids, int num_triangles,
               int batch_size) {
-  // Build the number of bounding boxes as the number of triangles
+
+#if PRINT_TIMINGS == 1
+  // Create the CUDA events used to estimate the execution time of each
+  // kernel.
+  cudaEvent_t start, stop;
+  cudaEventCreate(&start);
+  cudaEventCreate(&stop);
+#endif
+
   thrust::device_vector<AABB<T>> bounding_boxes(num_triangles);
-  // Grid -> GPU block -> multiprocesser -> thread -> streamprocesser
-  // gridSize: number of blocks in grid in each dimension
-  // blockSize: number of threads in a block in each dimension
-  // int blockSize, int gridSize for 1D structure.
-  // For higher dimensions, use dim3 (construction) and uint3 (indices) structure.
-  // See http://users.wfu.edu/choss/CUDA/docs/Lecture%205.pdf
+
   int blockSize = NUM_THREADS;
-  int gridSize = (num_triangles + blockSize - 1) / blockSize; // About num_triangle/thread (int/int=floor(float))
+  int gridSize = (num_triangles + blockSize - 1) / blockSize;
+#if PRINT_TIMINGS == 1
+  cudaEventRecord(start);
+#endif
   // Compute the bounding box for all the triangles
-  // data() gets encapsulated pointer, get() gets raw pointer.
-  ComputeTriBoundingBoxes<T><<<gridSize, blockSize>>>(triangles, num_triangles, bounding_boxes.data().get());
+#if DEBUG_PRINT == 1
+  std::cout << "Start computing triangle bounding boxes" << std::endl;
+#endif
+  ComputeTriBoundingBoxes<T><<<gridSize, blockSize>>>(
+      triangles, num_triangles, bounding_boxes.data().get());
+#if PRINT_TIMINGS == 1
+  cudaEventRecord(stop);
+#endif
+
   cudaCheckError();
-  // Compute the union of all the bounding boxes 
-  // Efficient way using thrust::reduce and functor MergeAABB.
-  // See https://docs.nvidia.com/cuda/thrust/
-  // reduce(first, last, init, binary_op), binary_op aggregates all the elements in bounding_boxes. binary_op must be comutative.
-  // See https://thrust.github.io/doc/group__reductions_ga5e9cef4919927834bec50fc4829f6e6b.html#ga5e9cef4919927834bec50fc4829f6e6b
-  AABB<T> host_scene_bb = thrust::reduce(bounding_boxes.begin(), bounding_boxes.end(), AABB<T>(), MergeAABB<T>());
+
+#if DEBUG_PRINT == 1
+  std::cout << "Finished computing triangle bounding_boxes" << std::endl;
+#endif
+
+#if PRINT_TIMINGS == 1
+  cudaEventSynchronize(stop);
+  float milliseconds = 0;
+  cudaEventElapsedTime(&milliseconds, start, stop);
+  std::cout << "Compute Triangle Bounding boxes = " << milliseconds << " (ms)"
+            << std::endl;
+#endif
+
+#if PRINT_TIMINGS == 1
+  cudaEventRecord(start);
+#endif
+  // Compute the union of all the bounding boxes
+  AABB<T> host_scene_bb = thrust::reduce(
+      bounding_boxes.begin(), bounding_boxes.end(), AABB<T>(), MergeAABB<T>());
+#if PRINT_TIMINGS == 1
+  cudaEventRecord(stop);
+#endif
+
   cudaCheckError();
 
+#if DEBUG_PRINT == 1
+  std::cout << "Finished Calculating scene Bounding Box" << std::endl;
+#endif
 
+#if PRINT_TIMINGS == 1
+  cudaEventSynchronize(stop);
+  milliseconds = 0;
+  cudaEventElapsedTime(&milliseconds, start, stop);
+  std::cout << "Scene bounding box reduction = " << milliseconds << " (ms)"
+            << std::endl;
+#endif
 
-  // ???
+  // TODO: Custom reduction ?
   // Copy the bounding box back to the GPU
   AABB<T> *scene_bb_ptr;
   cudaMalloc(&scene_bb_ptr, sizeof(AABB<T>));
-  cudaMemcpy(scene_bb_ptr, &host_scene_bb, sizeof(AABB<T>), cudaMemcpyHostToDevice);
+  cudaMemcpy(scene_bb_ptr, &host_scene_bb, sizeof(AABB<T>),
+             cudaMemcpyHostToDevice);
+
   thrust::device_vector<MortonCode> morton_codes(num_triangles);
+#if DEBUG_PRINT == 1
+  std::cout << "Start Morton Code calculation ..." << std::endl;
+#endif
+
+#if PRINT_TIMINGS == 1
+  cudaEventRecord(start);
+#endif
   // Compute the morton codes for the centroids of all the primitives
   ComputeMortonCodes<T><<<gridSize, blockSize>>>(
       triangles, num_triangles, scene_bb_ptr,
       morton_codes.data().get());
+#if PRINT_TIMINGS == 1
+  cudaEventRecord(stop);
+#endif
+
   cudaCheckError();
+
+#if DEBUG_PRINT == 1
+  std::cout << "Finished calculating Morton Codes ..." << std::endl;
+#endif
+
+#if PRINT_TIMINGS == 1
+  cudaEventSynchronize(stop);
+  milliseconds = 0;
+  cudaEventElapsedTime(&milliseconds, start, stop);
+  std::cout << "Morton code calculation = " << milliseconds << " (ms)"
+            << std::endl;
+#endif
+
+#if DEBUG_PRINT == 1
+  std::cout << "Creating triangle ID sequence" << std::endl;
+#endif
   // Construct an array of triangle ids.
   thrust::sequence(triangle_ids->begin(), triangle_ids->end());
+#if DEBUG_PRINT == 1
+  std::cout << "Finished creating triangle ID sequence ..." << std::endl;
+#endif
+
   // Sort the triangles according to the morton code
+#if DEBUG_PRINT == 1
+  std::cout << "Starting Morton Code sorting!" << std::endl;
+#endif
+
   try {
+#if PRINT_TIMINGS == 1
+    cudaEventRecord(start);
+#endif
     thrust::sort_by_key(morton_codes.begin(), morton_codes.end(),
                         triangle_ids->begin());
+#if PRINT_TIMINGS == 1
+    cudaEventRecord(stop);
+#endif
+#if DEBUG_PRINT == 1
+    std::cout << "Finished morton code sorting!" << std::endl;
+#endif
+#if PRINT_TIMINGS == 1
+    cudaEventSynchronize(stop);
+    milliseconds = 0;
+    cudaEventElapsedTime(&milliseconds, start, stop);
+    std::cout << "Morton code sorting = " << milliseconds << " (ms)"
+              << std::endl;
+#endif
   } catch (thrust::system_error e) {
     std::cout << "Error inside sort: " << e.what() << std::endl;
   }
+
+#if DEBUG_PRINT == 1
+  std::cout << "Start building radix tree" << std::endl;
+#endif
+#if PRINT_TIMINGS == 1
+  cudaEventRecord(start);
+#endif
   // Construct the radix tree using the sorted morton code sequence
   BuildRadixTree<T><<<gridSize, blockSize>>>(
       morton_codes.data().get(), num_triangles, triangle_ids->data().get(),
       internal_nodes, leaf_nodes);
+#if PRINT_TIMINGS == 1
+  cudaEventRecord(stop);
+#endif
+
   cudaCheckError();
+
+#if DEBUG_PRINT == 1
+  std::cout << "Finished radix tree" << std::endl;
+#endif
+#if PRINT_TIMINGS == 1
+  cudaEventSynchronize(stop);
+  milliseconds = 0;
+  cudaEventElapsedTime(&milliseconds, start, stop);
+  std::cout << "Building radix tree = " << milliseconds << " (ms)" << std::endl;
+#endif
   // Create an array that contains the atomic counters for each node in the
   // tree
   thrust::device_vector<int> counters(num_triangles);
+
+#if DEBUG_PRINT == 1
+  std::cout << "Start Linear BVH generation" << std::endl;
+#endif
   // Build the Bounding Volume Hierarchy in parallel from the leaves to the
   // root
   CreateHierarchy<T><<<gridSize, blockSize>>>(
       internal_nodes, leaf_nodes, num_triangles, triangles,
       triangle_ids->data().get(), counters.data().get());
+
   cudaCheckError();
+
+#if PRINT_TIMINGS == 1
+  cudaEventRecord(stop);
+#endif
+#if DEBUG_PRINT == 1
+  std::cout << "Finished with LBVH generation ..." << std::endl;
+#endif
+
+#if PRINT_TIMINGS == 1
+  cudaEventSynchronize(stop);
+  milliseconds = 0;
+  cudaEventElapsedTime(&milliseconds, start, stop);
+  std::cout << "Hierarchy generation = " << milliseconds << " (ms)"
+            << std::endl;
+#endif
+
   cudaFree(scene_bb_ptr);
   return;
 }
 
 void bvh_cuda_forward(at::Tensor triangles, at::Tensor *collision_tensor_ptr,
                       int max_collisions = 16) {
-  /// Setup parameters
   const auto batch_size = triangles.size(0);
   const auto num_triangles = triangles.size(1);
-  /// make triangle ids
+
   thrust::device_vector<int> triangle_ids(num_triangles);
 
   int blockSize = NUM_THREADS;
   int gridSize = (num_triangles + blockSize - 1) / blockSize;
 
   thrust::device_vector<long2> collisionIndices(num_triangles * max_collisions);
+
+#if PRINT_TIMINGS == 1
+  cudaEvent_t start, stop;
+  cudaEventCreate(&start);
+  cudaEventCreate(&stop);
+#endif
 
   // int *counter;
   thrust::device_vector<int> collision_idx_cnt(batch_size);

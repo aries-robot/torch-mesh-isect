@@ -61,6 +61,7 @@ bvh_include_dirs = torch.utils.cpp_extension.include_paths() + [
     # os.path.dirname(os.path.abspath(__file__)) + '/dependencies/cuda-samples/Common'
 ]
 
+# Use '-D+macro=value' flag to add macro in nvcc
 bvh_extra_compile_args = {'nvcc': ['-DPRINT_TIMINGS=0', '-DDEBUG_PRINT=0',
                                    '-DERROR_CHECKING=1',
                                    '-DCOLLISION_ORDERING=1'],

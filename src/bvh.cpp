@@ -16,7 +16,6 @@
 */
 
 #include <torch/extension.h>
-
 #include <vector>
 
 void bvh_cuda_forward(at::Tensor triangles, at::Tensor* collision_tensor_ptr,
