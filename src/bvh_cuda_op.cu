@@ -727,6 +727,7 @@ void buildBVH(BVHNodePtr<T> internal_nodes, BVHNodePtr<T> leaf_nodes,
   // blockSize: number of threads in a block in each dimension
   // int blockSize, int gridSize for 1D structure.
   // For higher dimensions, use dim3 (construction) and uint3 (indices) structure.
+  // gridSize dim: max=2, blockSize dim: max=3
   // See http://users.wfu.edu/choss/CUDA/docs/Lecture%205.pdf
   int blockSize = NUM_THREADS;
   int gridSize = (num_triangles + blockSize - 1) / blockSize; // About num_triangle/thread (int/int=floor(float))
@@ -741,14 +742,15 @@ void buildBVH(BVHNodePtr<T> internal_nodes, BVHNodePtr<T> leaf_nodes,
   // See https://thrust.github.io/doc/group__reductions_ga5e9cef4919927834bec50fc4829f6e6b.html#ga5e9cef4919927834bec50fc4829f6e6b
   AABB<T> host_scene_bb = thrust::reduce(bounding_boxes.begin(), bounding_boxes.end(), AABB<T>(), MergeAABB<T>());
   cudaCheckError();
-
-
-
-  // ???
-  // Copy the bounding box back to the GPU
+  // Copy the bounding box back to the GPU.
+  // Because reduce only returns the output to the host, not device.
+  // Maybe reduce_by_key is faster? (Try later.)
   AABB<T> *scene_bb_ptr;
   cudaMalloc(&scene_bb_ptr, sizeof(AABB<T>));
   cudaMemcpy(scene_bb_ptr, &host_scene_bb, sizeof(AABB<T>), cudaMemcpyHostToDevice);
+
+  /// ??
+
   thrust::device_vector<MortonCode> morton_codes(num_triangles);
   // Compute the morton codes for the centroids of all the primitives
   ComputeMortonCodes<T><<<gridSize, blockSize>>>(
