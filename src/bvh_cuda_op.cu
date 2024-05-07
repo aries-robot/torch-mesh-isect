@@ -146,7 +146,7 @@ __host__ __device__ __forceinline__ float vec_sq_diff(const vec3<T> &vec1,
 
 template <typename T> struct AABB {
 public:
-  /// aries: __host__ __device__: Can run both of cpu and gpu.
+  /// __host__ __device__: Can run both of cpu and gpu.
   /// min: if T is float, use float max. else, use double max.
   __host__ __device__ AABB() {
     min_t.x = std::is_same<T, float>::value ? FLT_MAX : DBL_MAX; 
@@ -743,7 +743,7 @@ void buildBVH(BVHNodePtr<T> internal_nodes, BVHNodePtr<T> leaf_nodes,
   AABB<T> host_scene_bb = thrust::reduce(bounding_boxes.begin(), bounding_boxes.end(), AABB<T>(), MergeAABB<T>());
   cudaCheckError();
   // Copy the bounding box back to the GPU.
-  // Because reduce only returns the output to the host, not device.
+  // Because reduce only can return the output to the host, not device.
   // Maybe reduce_by_key is faster? (Try later.)
   AABB<T> *scene_bb_ptr;
   cudaMalloc(&scene_bb_ptr, sizeof(AABB<T>));
